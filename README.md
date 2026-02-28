@@ -97,13 +97,16 @@ The database schema is designed to enforce strict referential integrity. All pri
 erDiagram
     USERS ||--o{ FILES : owns
     USERS ||--o{ FOLDERS : owns
-    USERS ||--o{ SHARES_SENT : initiates
-    USERS ||--o{ SHARES_RECEIVED : receives
+    USERS ||--o{ SHARES : executes
+    USERS ||--o{ SIGNATURES : owns
+    USERS ||--o{ REQUESTS : initiates
+    USERS ||--o{ DOCUMENT_TRANSACTIONS : triggers
     
     FOLDERS ||--o{ FILES : contains
     FOLDERS ||--o| FOLDERS : parent
     
     FILES ||--|{ SHARES : transferred_in
+    FILES ||--|{ DOCUMENT_TRANSACTIONS : logged_in
     
     USERS {
         uuid id PK
@@ -111,6 +114,16 @@ erDiagram
         string phone UK
         bigint storage_quota_bytes
         bigint storage_used_bytes
+    }
+    
+    SIGNATURES {
+        uuid id PK
+        uuid user_id FK
+        string name
+        boolean is_default
+        string signature_base64
+        string storage_key
+        timestamp created_at
     }
     
     FILES {
@@ -138,6 +151,24 @@ erDiagram
         uuid owner_user_id FK
         string name
         string parent_folder_id FK
+    }
+
+    REQUESTS {
+        uuid id PK
+        uuid requester_id FK
+        string title
+        string description
+        string target_phone
+        uuid fullfilled_by_file_id FK
+        enum status "pending, fulfilled"
+    }
+
+    DOCUMENT_TRANSACTIONS {
+        uuid id PK
+        enum transaction_type "upload, download, sign..."
+        uuid initiator_user_id FK
+        uuid file_id FK
+        timestamp created_at
     }
 ```
 
@@ -174,7 +205,13 @@ To prevent server bottlenecks, FileFlow uses direct-to-cloud uploads.
             *   Update Recipient Quota.
         3.  **Commit**: Return Transaction Receipt.
 
-### 4.4 Internal Native e-Signatures
+### 4.4 File Requests (The Fulfillment Engine)
+Users can actively request documents from peers without sending them a link.
+1.  **POST** `/api/v1/requests`: User A creates a request targeting User B's phone number.
+2.  **GET** `/api/v1/requests/pending`: User B sees a pending request badge.
+3.  **POST** `/api/v1/requests/{id}/fulfill`: User B selects a local file and fulfills the request. This triggers the **Zero-Copy Engine** to instantly transfer the file to User A.
+
+### 4.5 Internal Native e-Signatures
 Users can sign PDF documents directly without external tools.
 1. User draws a signature on the Mobile/Web UI, saved as a Base64 image to B2.
 2. User overlays a signature box over a PDF viewer and hits "Apply".
