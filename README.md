@@ -1,9 +1,17 @@
-# KESKUR: Distributed File Transaction Protocol
-## Technical Architecture & System Design Whitepaper
+<div align="center">
+  
+# 🚀 KESKUR: Distributed File Transaction Protocol
+**Technical Architecture & System Design Whitepaper**
 
-**Date:** February 12, 2026
-**Version:** 2.1.1 (Production Release)
-**Status:** Active
+![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)
+![Next JS](https://img.shields.io/badge/Next-black?style=for-the-badge&logo=next.js&logoColor=white)
+![React Native](https://img.shields.io/badge/react_native-%2320232a.svg?style=for-the-badge&logo=react&logoColor=%2361DAFB)
+![Postgres](https://img.shields.io/badge/postgres-%23316192.svg?style=for-the-badge&logo=postgresql&logoColor=white)
+![Redis](https://img.shields.io/badge/redis-%23DD0031.svg?style=for-the-badge&logo=redis&logoColor=white)
+
+**Date:** February 28, 2026  |  **Version:** 2.1.1 (Production Release)  |  **Status:** Active
+
+</div>
 
 ---
 
@@ -69,13 +77,14 @@ graph TD
 
 | Component | Technology | Rationale |
 | :--- | :--- | :--- |
-| **Mobile Client** | **React Native (0.74)** + Expo (51) | Cross-platform native performance, OTA updates, access to biometric hardware. |
-| **Web Client** | **Next.js 14** + TypeScript | Server-Side Rendering (SSR) for speed, SEO, and strict type safety. |
-| **Styling** | **Tailwind CSS** + NativeWind | Unified design system across Web and Mobile. |
+| **Mobile Client** | **React Native (0.74)** + Expo (51) | Cross-platform native performance, OTA updates, native share sheets. |
+| **Web Client** | **Next.js 14** + TypeScript | Server-Side Rendering (SSR) for speed, SEO, strict type safety. |
+| **Styling** | **Tailwind CSS** + shadcn/ui | Unified design system across Web and Mobile. |
 | **Backend API** | **FastAPI** (Python 3.10) | High-performance async I/O, auto-generated OpenAPI docs, Pydantic validation. |
-| **Database** | **PostgreSQL 15** | ACID compliance is critical for the transactional ledger system. |
+| **Database** | **PostgreSQL 15** | ACID compliance is essential for the transactional ledger system. |
 | **Object Storage** | **Backblaze B2** | S3-compatible, immutable object locking, effectively infinite scalability ($0.005/GB). |
 | **Caching** | **Redis 7** | Sub-millisecond latency for OTPs, session management, and rate limiting. |
+| **PDF Engine** | **PyMuPDF & ReportLab** | Used server-side for flattening e-signatures visually onto PDFs. |
 | **ORM** | **SQLAlchemy** (Async) | Robust database abstraction with full async support. |
 
 ---
@@ -100,10 +109,8 @@ erDiagram
         uuid id PK
         string email UK
         string phone UK
-        string password_hash
         bigint storage_quota_bytes
         bigint storage_used_bytes
-        boolean mfa_enabled
     }
     
     FILES {
@@ -114,8 +121,7 @@ erDiagram
         string storage_key "Canonical B2 Path"
         bigint size_bytes
         string mime_type
-        string checksum_sha256
-        enum status "uploading, uploaded, deleted"
+        enum status "pending, uploaded, deleted"
     }
     
     SHARES {
@@ -124,8 +130,6 @@ erDiagram
         uuid sender_user_id FK
         uuid recipient_user_id FK
         uuid file_id FK
-        jsonb permissions
-        enum status "sent, delivered, viewed"
         timestamp created_at
     }
     
@@ -139,65 +143,84 @@ erDiagram
 
 ---
 
-## 4. API Specification (v1)
+## 4. API Specification & File Flows (v1)
 
 The system exposes a RESTful API with strict adherence to HTTP semantics and JSON structure.
 
-### 4.1 Authentication Module
-*   **POST** `/api/v1/auth/login`
-    *   **Payload**: `username`, `password`
-    *   **Response**: `access_token` (JWT), `refresh_token` (HttpOnly Cookie).
+### 4.1 Authentication Module (Passwordless OTP)
 *   **POST** `/api/v1/auth/send-otp`
     *   **Payload**: `phone_number`
-    *   **Mechanism**: Generates 6-digit CSPRNG code, stores in Redis (TTL 300s), dispatches via Twilio SMS.
+    *   **Mechanism**: Generates 6-digit code, stores in Redis (TTL 300s), dispatches via Twilio SMS.
+*   **POST** `/api/v1/auth/verify-otp`
+    *   **Mechanism**: Validates OTP. If phone is new, automatically provisions user account + default folders. Returns stateless JWT `access_token`.
 
-### 4.2 Secure Upload Pipeline (Presigned URLs)
-To prevent server bottlenecks, FileFlow uses a direct-to-cloud upload capability.
-
+### 4.2 Secure Direct-to-Cloud Upload Pipeline
+To prevent server bottlenecks, FileFlow uses direct-to-cloud uploads.
 1.  **POST** `/api/v1/files/upload/init`
-    *   **Input**: `{ filename: "contract.pdf", size_bytes: 5242880, mime_type: "application/pdf" }`
-    *   **Logic**: 
-        *   Verifies User Quota.
-        *   Validates Content-Type.
-        *   Generates `storage_key`.
-    *   **Output**: `{ upload_url: "https://b2.backblaze.com/...", file_id: "..." }`
-2.  **Client Action**: Client performs `PUT` request directly to `upload_url`.
+    *   **Logic**: Verifies User Quota. Generates unique `storage_key`.
+    *   **Output**: Backblaze B2 `upload_url` and `authorization_token`.
+2.  **Client Action**: Client performs `PUT` request directly to the `upload_url`, bypassing the FastAPI server.
 3.  **POST** `/api/v1/files/upload/{id}/complete`
-    *   **Logic**: Backend verifies file existence and updates DB status to `uploaded`.
+    *   **Logic**: Backend updates DB status to `uploaded` and deducts user quota.
 
-### 4.3 Transaction Engine (Sharing)
+### 4.3 Transaction Engine (Zero-Copy Sharing)
 *   **POST** `/api/v1/shares`
     *   **Input**: `{ file_id: "...", recipient_phone: "..." }`
     *   **Process (Atomic Transaction)**:
         1.  **Lock**: Verify Sender ownership. Verify Recipient existence.
         2.  **Execute**: 
+            *   Create specific new `File` pointer for Recipient with the exact same `storage_key` as Sender (Zero-Copy).
             *   Create `Share` Ledger Entry.
-            *   Create specific `File` pointer for Recipient (Zero-Copy).
             *   Update Recipient Quota.
         3.  **Commit**: Return Transaction Receipt.
+
+### 4.4 Internal Native e-Signatures
+Users can sign PDF documents directly without external tools.
+1. User draws a signature on the Mobile/Web UI, saved as a Base64 image to B2.
+2. User overlays a signature box over a PDF viewer and hits "Apply".
+3. **POST** `/files/{id}/sign`: Backend pulls the raw PDF to RAM, uses `ReportLab` to draw the image and timestamp, merges it with `PyMuPDF`, and re-uploads it as a brand new unique locked file.
 
 ---
 
 ## 5. Security Protocols
 
 ### 5.1 Zero-Trust Architecture
-*   **Presigned URLs**: The API Server never handles file binary data. All file access is via time-limited (1 hour) signed URLs generated on-the-fly.
-*   **JWT Authentication**: Stateless authentication using RSA-signed JSON Web Tokens.
-*   **Rate Limiting**: Intelligent throttling via Redis (100 req/min/IP) to prevent DDoS.
+*   **Presigned URLs**: The API Server never handles file binary data for downloads. All file viewing invokes `GET /files/{id}/view` returning a temporary Presigned URL valid for exactly 1 hour. There are no static links.
+*   **JWT Authentication**: Stateless authentication using RSA/HS256 signed JSON Web Tokens.
+*   **Rate Limiting**: Intelligent throttling via Redis (using `slowapi`) to prevent DDoS attacks.
 
 ### 5.2 Data Protection
-*   **In-Transit**: All traffic is encrypted via TLS 1.3.
-*   **At-Rest**: Files in B2 are encrypted using AES-256 (Server-Side Encryption).
-*   **Input Sanitization**: Pydantic models strip malicious payloads from all inputs.
+*   **At-Rest**: Files in B2 are encrypted.
+*   **Input Sanitization**: Pydantic models validate and sanitize all payloads before database interaction.
+*   **Immutability**: Once a file is signed or sent, the zero-copy logic ensures it cannot be maliciously edited without wiping the database record.
 
 ---
 
 ## 6. Scalability & Deployment
 
-### 6.1 Containerization
-The entire stack is containerized using Docker, ensuring consistency across Development, Staging, and Production environments.
+### 6.1 Scaling Strategy
+*   **Stateless API**: FastAPI relies completely on Postgres/Redis, allowing the API instances to horizontally scale infinitely behind an Nginx Load Balancer or within Kubernetes.
+*   **CDN Integration**: Future-ready edge caching for public assets.
 
-### 6.2 Scaling Strategy
-*   **Stateless API**: The FastAPI backend is stateless, allowing for infinite horizontal scaling behind a Load Balancer.
-*   **Database Read Replicas**: For high-read workloads, Read Replicas can be deployed to offload `SELECT` queries.
-*   **CDN Integration**: Publicly shared files are cached at the edge (Cloudflare) to reduce latency and bandwidth costs.
+### 6.2 Local Development Setup
+**Backend (`backend/`)**
+```bash
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+# Requires: DATABASE_URL, REDIS_URL, B2_KEY_ID, B2_APPLICATION_KEY, TWILIO env vars
+uvicorn app.main:app --reload --port 8000
+```
+
+**Web Dashboard (`web/`)**
+```bash
+npm install
+# Requires: NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+npm run dev
+```
+
+**Mobile App (`mobile/`)**
+```bash
+npm install
+# Update /src/services/api.js with local network IP or Ngrok URL
+npx expo start -c
+```
